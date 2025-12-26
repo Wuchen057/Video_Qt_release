@@ -1,0 +1,29 @@
+# --- Visual Studio 临时文件 ---
+.vs/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+*.sln.docstates
+*.png
+video/
+*.avi
+*.jpg
+
+# --- Qt 自动生成的文件 ---
+GeneratedFiles/
+ui_*.h
+moc_*.cpp
+qrc_*.cpp
+*.qmlc
+*.jsc
+
+# --- 编译输出 ---
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.lib
+*.dll

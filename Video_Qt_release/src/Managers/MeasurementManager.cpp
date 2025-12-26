@@ -100,7 +100,7 @@ void solvePnPWithCircleCorrection(
     double markerRadius,
     cv::Mat& rvec,
     cv::Mat& tvec,
-    double& rmse
+    double& rmsError
 )
 {
     // 1. 初始解算
@@ -165,259 +165,304 @@ void solvePnPWithCircleCorrection(
         }
 
         // F. 重新解算 (使用 ITERATIVE 进行微调)
-        cv::solvePnP(objectPoints, correctedImagePoints, cameraMatrix, distCoeffs, rvec, tvec, true, cv::SOLVEPNP_ITERATIVE);
+        bool success = cv::solvePnP(objectPoints, correctedImagePoints, cameraMatrix, distCoeffs, rvec, tvec, true, cv::SOLVEPNP_ITERATIVE);
+
+        // 2. 将 3D 点重投影回 2D 图像
+        std::vector<cv::Point2f> projectedPoints;
+        projectPoints(objectPoints, rvec, tvec, cameraMatrix, distCoeffs, projectedPoints);
+
+        // 3. 计算重投影误差 (使用 L2 范数)
+        // norm 函数可以直接计算两个点集之间的差值的范数 (即 sum((x1-x2)^2 + (y1-y2)^2) 的平方根)
+        double totalError = norm(correctedImagePoints, projectedPoints, cv::NORM_L2);
+
+        // 4. 计算 RMS (均方根误差) 或 平均误差
+        // RMSE 计算公式: sqrt( sum(dist^2) / n )
+        // totalError 已经是 sqrt( sum(dist^2) )，所以：
+        double totalPoints = (double)objectPoints.size();
+        rmsError = totalError / sqrt(totalPoints);
+
     }
-
-    // 1. 定义容器存放重投影后的 2D 点
-    std::vector<cv::Point2f> projectedPoints;
-
-    // 2. 将 3D 点重新投影到图像平面
-    cv::projectPoints(objectPoints, rvec, tvec, cameraMatrix, distCoeffs, projectedPoints);
-
-    // 3. 计算误差
-    double totalErr = 0;
-    // 使用 cv::norm 计算两个点集之间的 L2 范数（欧氏距离）
-    // NORM_L2 会计算 sqrt(sum((x1-x2)^2 + (y1-y2)^2))
-    totalErr = cv::norm(correctedImagePoints, projectedPoints, cv::NORM_L2);
-
-    // 如果你想看“平均像素误差”：
-    double totalPoints = (double)objectPoints.size();
-    double meanReprojectionError = std::sqrt(totalErr * totalErr / totalPoints); // 如果使用 cv::norm(..., NORM_L2) 直接得到的是总距离的平方根（如果是点集），这步需注意
-    // 更通用的手动累加写法（推荐，逻辑更清晰）：
-
-    double sumReprojectionError = 0.0;
-    for (size_t i = 0; i < objectPoints.size(); ++i) {
-        double err = cv::norm(correctedImagePoints[i] - projectedPoints[i]); // 单个点的欧氏距离
-        sumReprojectionError += err * err; // 累加平方
-    }
-    // 计算 RMSE (均方根误差)
-    rmse = std::sqrt(sumReprojectionError / objectPoints.size());
-
-    //std::cout << "重投影误差 (RMSE): " << rmse << " pixels" << std::endl;
-
 }
 
-// 辅助结构体
 struct PointWithId {
     cv::Point2f pt;
-    int id;
+    int id; // 1-based ID
 };
 
-static double distance(const cv::Point2f& p1, const cv::Point2f& p2) {
-    return std::sqrt(std::pow(p1.x - p2.x, 2) + std::pow(p1.y - p2.y, 2));
+
+// 计算欧氏距离
+static double dist_sq(const cv::Point2f& p1, const cv::Point2f& p2) {
+    return std::pow(p1.x - p2.x, 2) + std::pow(p1.y - p2.y, 2);
 }
 
-// 点匹配逻辑
-std::vector<cv::Point2f> match_points(const std::vector<cv::Point2f>& detected_pts, float& dist_threshold) {
-    if (detected_pts.size() != 14) {
-        // std::cerr << "Input points size != 14" << std::endl;
-        return {};
+static double distance(const cv::Point2f& p1, const cv::Point2f& p2) {
+    return std::sqrt(dist_sq(p1, p2));
+}
+
+
+// 计算二维向量叉积 (P-A) x (C-A) 的Z分量
+// 用于判断点 P 在 向量 AC 的左侧还是右侧
+static double cross_product_2d(const cv::Point2f& a, const cv::Point2f& c, const cv::Point2f& p) {
+    cv::Point2f ac = c - a;
+    cv::Point2f ap = p - a;
+    return ac.x * ap.y - ac.y * ap.x;
+}
+
+
+// 计算重投影误差
+static double compute_reprojection_error(
+    const std::vector<cv::Point3f>& object_points,
+    const std::vector<cv::Point2f>& image_points,
+    const cv::Mat& rvec, const cv::Mat& tvec,
+    const cv::Mat& camera_matrix, const cv::Mat& dist_coeffs)
+{
+    if (object_points.empty()) return 1e9;
+    std::vector<cv::Point2f> projected;
+    cv::projectPoints(object_points, rvec, tvec, camera_matrix, dist_coeffs, projected);
+
+    double sum_err = 0;
+    for (size_t i = 0; i < object_points.size(); ++i) {
+        sum_err += cv::norm(projected[i] - image_points[i]);
     }
+    return sum_err / object_points.size();
+}
 
-    // 复制一份，避免在原 vector 上 shuffle
-    std::vector<cv::Point2f> detected_pts_shuffled = detected_pts;
 
-    // 优化: 只有在检测失败时才用 K-Means 这种昂贵的操作
-    // 但鉴于逻辑依赖聚类，我们优化聚类参数
-    cv::Mat points_mat(detected_pts_shuffled.size(), 1, CV_32FC2, detected_pts_shuffled.data());
+// 新的鲁棒匹配函数
+    // 返回包含关键骨架点和待定侧翼点的列表
+    // ID 105 和 107 为临时ID，分别代表向量两侧的点
+std::vector<PointWithId> match_points_robust(const std::vector<cv::Point2f>& detected_pts) {
+    if (detected_pts.size() != 14) return {};
+
+    // 1. K-Means 聚类 (保持原有逻辑，参数稍作优化)
+    cv::Mat points_mat(detected_pts.size(), 1, CV_32FC2, (void*)detected_pts.data());
     cv::Mat labels, centers_mat;
 
-    // 优化点4: 减少 K-Means 迭代次数和精度要求
+    // 尝试多次以避免局部最优
     cv::kmeans(points_mat, 3, labels,
-        cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 5, 1.0), // Count 10->5
-        3, // Attempts 5->3
-        cv::KMEANS_PP_CENTERS, centers_mat);
+        cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 10, 1.0),
+        5, cv::KMEANS_PP_CENTERS, centers_mat);
 
-    std::map<int, int> cluster_counts;
-    for (int i = 0; i < labels.rows; ++i) cluster_counts[labels.at<int>(i)]++;
-
-    if (cluster_counts.size() != 3) return {};
-
-    // 逻辑保持不变...
-    int label_a = -1, label_b = -1, label_c = -1;
-    for (const auto& pair : cluster_counts) {
-        if (pair.second == 3) label_a = pair.first;
-        else if (pair.second == 5) label_b = pair.first;
-        else if (pair.second == 6) label_c = pair.first;
+    std::map<int, std::vector<cv::Point2f>> clusters;
+    for (int i = 0; i < detected_pts.size(); ++i) {
+        clusters[labels.at<int>(i)].push_back(detected_pts[i]);
     }
 
+    if (clusters.size() != 3) return {};
+
+    // 识别 A(3点), B(5点), C(6点)
+    int label_a = -1, label_b = -1, label_c = -1;
+    for (const auto& pair : clusters) {
+        if (pair.second.size() == 3) label_a = pair.first;
+        else if (pair.second.size() == 5) label_b = pair.first;
+        else if (pair.second.size() == 6) label_c = pair.first;
+    }
     if (label_a == -1 || label_b == -1 || label_c == -1) return {};
 
-    std::vector<cv::Point2f> points_in_a, points_in_b, points_in_c;
-    points_in_a.reserve(3); points_in_b.reserve(5); points_in_c.reserve(6);
+    std::vector<cv::Point2f> pts_a = clusters[label_a];
+    std::vector<cv::Point2f> pts_b = clusters[label_b];
+    std::vector<cv::Point2f> pts_c = clusters[label_c];
 
-    for (int i = 0; i < detected_pts_shuffled.size(); ++i) {
-        int label = labels.at<int>(i);
-        if (label == label_a) points_in_a.push_back(detected_pts_shuffled[i]);
-        else if (label == label_b) points_in_b.push_back(detected_pts_shuffled[i]);
-        else if (label == label_c) points_in_c.push_back(detected_pts_shuffled[i]);
-    }
+    // 计算几何中心 (比 K-Means 中心更准确)
+    cv::Point2f center_a(0, 0), center_c(0, 0);
+    for (const auto& p : pts_a) center_a += p; center_a /= (float)pts_a.size();
+    for (const auto& p : pts_c) center_c += p; center_c /= (float)pts_c.size();
 
-    cv::Point2f center_a(centers_mat.at<cv::Vec2f>(label_a, 0)[0], centers_mat.at<cv::Vec2f>(label_a, 0)[1]);
-    cv::Point2f center_c(centers_mat.at<cv::Vec2f>(label_c, 0)[0], centers_mat.at<cv::Vec2f>(label_c, 0)[1]);
+    std::vector<PointWithId> result;
+    result.reserve(14);
 
-    std::vector<PointWithId> result_a, result_b, result_c;
-    result_a.reserve(3); result_b.reserve(5); result_c.reserve(6);
-
-    // --- ID 分配逻辑 (保持原逻辑) ---
-    // A Cluster
-    std::sort(points_in_a.begin(), points_in_a.end(), [&](const cv::Point2f& p1, const cv::Point2f& p2) {
+    // --- 处理 Cluster A (顶部 3 点) ---
+    // 排序依据：距离 Center C 的远近。 1(最远), 2(中), 3(最近)
+    std::sort(pts_a.begin(), pts_a.end(), [&](const cv::Point2f& p1, const cv::Point2f& p2) {
         return distance(p1, center_c) > distance(p2, center_c);
         });
-    for (size_t i = 0; i < points_in_a.size(); ++i) result_a.push_back({ points_in_a[i], static_cast<int>(i + 1) });
+    result.push_back({ pts_a[0], 1 });
+    result.push_back({ pts_a[1], 2 });
+    result.push_back({ pts_a[2], 3 });
 
-    // B Cluster
-    auto min_max_b = std::minmax_element(points_in_b.begin(), points_in_b.end(), [&](const cv::Point2f& p1, const cv::Point2f& p2) {
-        return distance(p1, center_a) < distance(p2, center_a);
+    // --- 处理 Cluster B (中间 5 点) ---
+    // 关键点：4(近A), 8(近C)。中间是 5,6,7。
+    // 6 在轴线上，5 和 7 在两侧。
+
+    // 1. 找两端点
+    auto it_4 = std::min_element(pts_b.begin(), pts_b.end(), [&](auto& a, auto& b) {
+        return distance(a, center_a) < distance(b, center_a);
         });
-    cv::Point2f pt_id_4 = *min_max_b.first;
-    cv::Point2f pt_id_8 = *min_max_b.second;
+    cv::Point2f pt_4 = *it_4;
 
-    std::vector<cv::Point2f> remaining_b;
-    for (const auto& p : points_in_b) {
-        if (cv::norm(p - pt_id_4) > 0.1 && cv::norm(p - pt_id_8) > 0.1) remaining_b.push_back(p);
-    }
-    std::sort(remaining_b.begin(), remaining_b.end(), [&](const cv::Point2f& p1, const cv::Point2f& p2) { return p1.y < p2.y; });
-
-    result_b.push_back({ pt_id_4, 4 });
-    if (remaining_b.size() >= 3) {
-        result_b.push_back({ remaining_b[0], 5 });
-        result_b.push_back({ remaining_b[1], 6 });
-        result_b.push_back({ remaining_b[2], 7 });
-    }
-    result_b.push_back({ pt_id_8, 8 });
-
-    // C Cluster
-    auto min_max_c = std::minmax_element(points_in_c.begin(), points_in_c.end(), [&](const cv::Point2f& p1, const cv::Point2f& p2) {
-        return distance(p1, center_a) < distance(p2, center_a);
+    auto it_8 = std::min_element(pts_b.begin(), pts_b.end(), [&](auto& a, auto& b) {
+        return distance(a, center_c) < distance(b, center_c);
         });
-    cv::Point2f pt_id_9 = *min_max_c.first;
-    cv::Point2f pt_id_14 = *min_max_c.second;
+    cv::Point2f pt_8 = *it_8;
 
-    std::vector<cv::Point2f> remaining_c;
-    for (const auto& p : points_in_c) {
-        if (cv::norm(p - pt_id_9) > 0.1 && cv::norm(p - pt_id_14) > 0.1) remaining_c.push_back(p);
-    }
-    if (std::abs(pt_id_9.x - pt_id_14.x) > std::abs(pt_id_9.y - pt_id_14.y) + 30) {
-        std::sort(remaining_c.begin(), remaining_c.end(), [](const cv::Point2f& p1, const cv::Point2f& p2) { return p1.y < p2.y; });
-    }
-    else {
-        std::sort(remaining_c.begin(), remaining_c.end(), [](const cv::Point2f& p1, const cv::Point2f& p2) { return p1.x > p2.x; });
+    result.push_back({ pt_4, 4 });
+    result.push_back({ pt_8, 8 });
+
+    // 2. 找中间点 (5,6,7)
+    std::vector<cv::Point2f> mid_b;
+    for (const auto& p : pts_b) {
+        if (p != pt_4 && p != pt_8) mid_b.push_back(p);
     }
 
-    result_c.push_back({ pt_id_9, 9 });
-    for (size_t i = 0; i < remaining_c.size(); ++i) result_c.push_back({ remaining_c[i], static_cast<int>(i + 10) });
-    result_c.push_back({ pt_id_14, 14 });
+    if (mid_b.size() == 3) {
+        // ID 6 是距离轴线 AC 最近的点 (叉积绝对值最小)
+        std::sort(mid_b.begin(), mid_b.end(), [&](const cv::Point2f& p1, const cv::Point2f& p2) {
+            return std::abs(cross_product_2d(center_a, center_c, p1)) < std::abs(cross_product_2d(center_a, center_c, p2));
+            });
+        result.push_back({ mid_b[0], 6 }); // 轴线点
 
-    // 筛选点
-    std::vector<cv::Point2f> selected_points;
-    selected_points.reserve(6);
-    for (const auto& p : result_a) if (p.id == 1 || p.id == 3) selected_points.push_back(p.pt);
-    for (const auto& p : result_b) if (p.id == 4 || p.id == 8) selected_points.push_back(p.pt);
-    for (const auto& p : result_c) if (p.id == 9 || p.id == 14) selected_points.push_back(p.pt);
+        // 剩余两个是 5 和 7。根据它们在向量 AC 的哪一侧来区分。
+        // 我们不能直接定死哪个是5哪个是7（因为可能翻转），
+        // 这里的策略是：叉积为负的给临时ID 107，叉积为正的给临时ID 105
+        // 稍后在 PnP 假设中尝试匹配
+        double cp1 = cross_product_2d(center_a, center_c, mid_b[1]);
+        double cp2 = cross_product_2d(center_a, center_c, mid_b[2]);
 
-    if (selected_points.size() >= 2) {
-        dist_threshold = cv::norm(selected_points[0] - selected_points[1]) / 4.0;
+        // 确保 mid_b[1] 是叉积较小(负)的，mid_b[2] 是较大的(正)
+        if (cp1 > cp2) std::swap(mid_b[1], mid_b[2]);
+
+        result.push_back({ mid_b[1], 107 }); // 临时 Side Negative
+        result.push_back({ mid_b[2], 105 }); // 临时 Side Positive
     }
-    else {
-        dist_threshold = 10.0; // 默认值
-    }
 
-    return selected_points;
+    // --- 处理 Cluster C (底部 6 点) ---
+    // 我们只需要 ID 9 (近A) 和 ID 14 (近C) 来稳固骨架，其余点留给投影匹配
+    auto it_9 = std::min_element(pts_c.begin(), pts_c.end(), [&](auto& a, auto& b) {
+        return distance(a, center_a) < distance(b, center_a);
+        });
+    auto it_14 = std::max_element(pts_c.begin(), pts_c.end(), [&](auto& a, auto& b) {
+        return distance(a, center_a) < distance(b, center_a);
+        });
+
+    result.push_back({ *it_9, 9 });
+    result.push_back({ *it_14, 14 });
+
+    return result;
 }
 
+
+// 主 PnP 函数
 bool MeasurementManager::customRANSACPnP(
-    const std::vector<cv::Point3f>& input_3d_points,
+    const std::vector<cv::Point3f>& input_3d_points, // 必须包含完整的14个点，顺序对应ID 1-14
     const std::vector<cv::Point2f>& detected_2d_points,
     const Camera& camera,
     int ransac_iterations, double reprojection_threshold, int min_sample_size,
-    cv::Mat& final_rvec, cv::Mat& final_tvec, double& error)
+    cv::Mat& final_rvec, cv::Mat& final_tvec, double& totalerror)
 {
-    if (detected_2d_points.size() < min_sample_size) return false;
+    if (detected_2d_points.size() < 10) return false;
 
-    float dist_threshold = 0;
-    // 1. 特征点匹配
-    std::vector<cv::Point2f> pre_match_2d_points = match_points(detected_2d_points, dist_threshold);
-    if (pre_match_2d_points.size() < 6) return false;
+    // 1. 进行鲁棒的特征点匹配
+    std::vector<PointWithId> pre_matches = match_points_robust(detected_2d_points);
+    if (pre_matches.size() < 8) return false; // 至少需要 1,2,3,4,8,9,14 + 2个翅膀
 
-    // 2. 初始位姿估计 (使用 EPNP，因为点是非平面的或有一定深度的)
-    // 对应 match_points 返回的 ID: 1, 3, 4, 8, 9, 14
-    static const std::vector<cv::Point3f> pre_match_3d_points = {
-        {  0.0f, 120.0f, 50.0f}, {  0.0f,  80.0f, 50.0f}, // A 1  3
-        {  0.0f, 20.0f,  0.0f},  {  0.0f, -20.0f,  0.0f}, // B 4  8
-        {  0.0f, -80.0f, 50.0f}, {  0.0f, -120.0f, 50.0f} // C 9 14
-    };
+    // 2. 准备 PnP 数据
+    std::vector<cv::Point3f> pnp_obj_pts;
+    std::vector<cv::Point2f> pnp_img_pts;
+    cv::Point2f pt_side_neg, pt_side_pos;
+    bool has_wings = false;
+    int wing_count = 0;
 
-    cv::Mat rvec, tvec;
-    bool pnp_success = cv::solvePnP(pre_match_3d_points, pre_match_2d_points,
-        camera.getCameraMatrix(), camera.getDistCoeffs(), rvec, tvec, false, cv::SOLVEPNP_EPNP);
-
-    if (!pnp_success) return false;
-
-    // 3. 重投影验证与剩余点匹配
-    static const std::vector<cv::Point3f> remaining_3d_points = {
-        { 0.0f,  100.0f, 50.0f}, // ID 2
-        { 20.0f,   0.0f,  0.0f}, {  0.0f,   0.0f,  0.0f}, {-20.0f,   0.0f,  0.0f}, // ID 5,6,7
-        { 30.0f, -100.0f, 50.0f}, { 10.0f, -100.0f, 50.0f}, {-10.0f, -100.0f, 50.0f}, {-30.0f, -100.0f, 50.0f}, // ID 10-13
-    };
-
-    std::vector<cv::Point2f> reprojected_2d_points;
-    cv::projectPoints(remaining_3d_points, rvec, tvec, camera.getCameraMatrix(), camera.getDistCoeffs(), reprojected_2d_points);
-
-    // 构建最终点集
-    std::vector<cv::Point3f> final_3d_points = pre_match_3d_points;
-    std::vector<cv::Point2f> final_2d_points = pre_match_2d_points;
-
-    // 标记已使用的 2D 点
-    std::vector<bool> used_2d_indices(detected_2d_points.size(), false);
-
-    // 简单的最近邻匹配 (比之前的逻辑更紧凑)
-    // 先标记前6个点
-    for (const auto& p : pre_match_2d_points) {
-        for (size_t i = 0; i < detected_2d_points.size(); ++i) {
-            if (!used_2d_indices[i] && cv::norm(p - detected_2d_points[i]) < 1.0f) {
-                used_2d_indices[i] = true;
-                break;
-            }
+    // 提取骨架点 (ID 1-4, 6, 8, 9, 14) 对应 X=0 的点
+    for (const auto& pm : pre_matches) {
+        if (pm.id <= 14) {
+            pnp_obj_pts.push_back(input_3d_points[pm.id - 1]);
+            pnp_img_pts.push_back(pm.pt);
         }
+        else if (pm.id == 107) { pt_side_neg = pm.pt; wing_count++; }
+        else if (pm.id == 105) { pt_side_pos = pm.pt; wing_count++; }
     }
 
-    // 匹配剩余点
-    const float MATCH_THRESH = dist_threshold;
-    for (size_t i = 0; i < reprojected_2d_points.size(); ++i) {
+    if (wing_count < 2) return false; // 必须有翅膀点来解算翻转
+
+    // 3. 双假设验证 (Double Hypothesis Testing)
+    // 假设 A: 正常放置 (Side Pos -> ID 5 (+20), Side Neg -> ID 7 (-20))
+    // 假设 B: 倒置/翻转 (Side Pos -> ID 7 (-20), Side Neg -> ID 5 (+20))
+
+    std::vector<cv::Point3f> obj_h1 = pnp_obj_pts;
+    std::vector<cv::Point2f> img_h1 = pnp_img_pts;
+    obj_h1.push_back(input_3d_points[5 - 1]); img_h1.push_back(pt_side_pos); // ID 5 (20) -> Pos
+    obj_h1.push_back(input_3d_points[7 - 1]); img_h1.push_back(pt_side_neg); // ID 7 (-20) -> Neg
+
+    std::vector<cv::Point3f> obj_h2 = pnp_obj_pts;
+    std::vector<cv::Point2f> img_h2 = pnp_img_pts;
+    obj_h2.push_back(input_3d_points[7 - 1]); img_h2.push_back(pt_side_pos); // ID 7 (-20) -> Pos
+    obj_h2.push_back(input_3d_points[5 - 1]); img_h2.push_back(pt_side_neg); // ID 5 (20) -> Neg
+
+    cv::Mat rvec1, tvec1, rvec2, tvec2;
+    // 使用 EPNP 进行初始估计，因为它对初始化不敏感
+    bool ret1 = cv::solvePnP(obj_h1, img_h1, camera.getCameraMatrix(), camera.getDistCoeffs(), rvec1, tvec1, false, cv::SOLVEPNP_EPNP);
+    bool ret2 = cv::solvePnP(obj_h2, img_h2, camera.getCameraMatrix(), camera.getDistCoeffs(), rvec2, tvec2, false, cv::SOLVEPNP_EPNP);
+
+    double err1 = compute_reprojection_error(obj_h1, img_h1, rvec1, tvec1, camera.getCameraMatrix(), camera.getDistCoeffs());
+    double err2 = compute_reprojection_error(obj_h2, img_h2, rvec2, tvec2, camera.getCameraMatrix(), camera.getDistCoeffs());
+
+    // 选出最好的姿态
+    cv::Mat best_rvec, best_tvec;
+    if (ret1 && (!ret2 || err1 < err2)) {
+        best_rvec = rvec1.clone();
+        best_tvec = tvec1.clone();
+    }
+    else if (ret2) {
+        best_rvec = rvec2.clone();
+        best_tvec = tvec2.clone();
+    }
+    else {
+        return false;
+    }
+
+    // 4. 全局匹配与优化
+    // 利用求得的粗略姿态，将所有14个3D点投影回去，通过最近邻寻找所有匹配点
+    std::vector<cv::Point2f> all_reproj;
+    cv::projectPoints(input_3d_points, best_rvec, best_tvec, camera.getCameraMatrix(), camera.getDistCoeffs(), all_reproj);
+
+    std::vector<cv::Point3f> final_3d;
+    std::vector<cv::Point2f> final_2d;
+    std::vector<bool> used_detection(detected_2d_points.size(), false);
+
+    // 使用贪婪策略匹配：对每个投影点，找最近的检测点
+    // 动态计算匹配阈值：基于投影的ID 4和8的距离
+    double scale = cv::norm(all_reproj[4 - 1] - all_reproj[8 - 1]); // ID 4到8的距离
+    double match_thresh = scale / 3.0; // 宽容度
+
+    for (size_t i = 0; i < input_3d_points.size(); ++i) {
         int best_idx = -1;
-        float min_dist = 1e9;
+        double min_dist = 1e9;
 
         for (size_t j = 0; j < detected_2d_points.size(); ++j) {
-            if (used_2d_indices[j]) continue;
-            float d = cv::norm(reprojected_2d_points[i] - detected_2d_points[j]);
+            double d = cv::norm(all_reproj[i] - detected_2d_points[j]);
             if (d < min_dist) {
                 min_dist = d;
                 best_idx = j;
             }
         }
 
-        if (best_idx != -1 && min_dist < MATCH_THRESH) {
-            final_3d_points.push_back(remaining_3d_points[i]);
-            final_2d_points.push_back(detected_2d_points[best_idx]);
-            used_2d_indices[best_idx] = true;
+        // 检查双向最近邻或简单阈值
+        if (best_idx != -1 && min_dist < match_thresh) {
+            // 防止同一个检测点被多次匹配（取最近的优先）
+            // 简单的去重逻辑：如果该检测点已被用过，比较谁更近（这里简化处理，直接用）
+            // 更严谨的做法是构建Cost Matrix做匈牙利算法，但这里最近邻足够
+            final_3d.push_back(input_3d_points[i]);
+            final_2d.push_back(detected_2d_points[best_idx]);
         }
     }
 
-    if (final_3d_points.size() < 6) return false;
+    if (final_3d.size() < 6) return false;
 
-    // 4. 最终高精度优化
-    // 使用圆心偏差修正算法
-    solvePnPWithCircleCorrection(final_3d_points, final_2d_points,
+    // 5. 最终高精度优化
+    // 调用你原有的圆心修正优化函数
+    solvePnPWithCircleCorrection(final_3d, final_2d,
         camera.getCameraMatrix(), camera.getDistCoeffs(),
         30.0, // Marker Radius
-        final_rvec, final_tvec, error);
+        final_rvec, final_tvec, totalerror);
 
     return true;
-}
+};
+
+
+
 
 bool MeasurementManager::processMeasurement(const cv::Mat& camA_image, const cv::Mat& camB_image,
-    PoseResult& camA_pose_curr, PoseResult& camB_pose_curr, cv::Mat& result_img, double& error) {
+    PoseResult& camA_pose_curr, PoseResult& camB_pose_curr, cv::Mat& result_img, double& totalerror) {
 
     if (camA_image.empty() || camB_image.empty()) return false;
 
@@ -436,8 +481,29 @@ bool MeasurementManager::processMeasurement(const cv::Mat& camA_image, const cv:
         cv::Mat rvec, tvec;
         // 注意：传入空 vector 让函数内部处理，或者传入 targetObject_.getReflectivePoints3D()
         // 这里我们传入一个 dummy，因为 customRANSACPnP 内部有写死的 3D 点坐标
-        std::vector<cv::Point3f> dummy_3d;
-        if (customRANSACPnP(dummy_3d, buffer_cornersA_, cameraA_, 0, 0, 0, rvec, tvec, error)) {
+        std::vector<cv::Point3f> dummy_3d = {
+            // a部分 (ID 1-3): 位于Y方向 (上方)
+            {-0.0f, 120.0f, 50.0f}, // ID 1
+            {-0.0f, 100.0f, 50.0f}, // ID 2
+            {-0.0f, 80.0f, 50.0f}, // ID 3
+
+            // b部分 (ID 4-8): 沿着-Y轴排列 (+Y向上)
+            {  0.0f, 20.0f, 0.0f}, // ID 4
+            { 20.0f,   0.0f, 0.0f}, // ID 5
+            { -0.0f,   0.0f, 0.0f}, // ID 6 (中心点)
+            {-20.0f,   0.0f, 0.0f}, // ID 7
+            {  0.0f, -20.0f, 0.0f}, // ID 8
+
+            // c部分 (ID 9-14): 位于-Y方向 (下方)，且有50mm深度
+            {  0.0f, -80.0f, 50.0f}, // ID 9
+            { 30.0f, -100.0f, 50.0f}, // ID 10
+            { 10.0f, -100.0f, 50.0f}, // ID 11
+            {-10.0f, -100.0f, 50.0f}, // ID 12
+            {-30.0f, -100.0f, 50.0f}, // ID 13
+            { -0.0f, -120.0f, 50.0f}  // ID 14
+        };
+
+        if (customRANSACPnP(dummy_3d, buffer_cornersA_, cameraA_, 0, 0, 0, rvec, tvec, totalerror)) {
             camA_pose_curr.rvec = rvec.clone();
             camA_pose_curr.tvec = tvec.clone();
             camA_pose_curr.T_matrix = poseEstimator_.getTransformMatrix(rvec, tvec);
@@ -482,7 +548,7 @@ bool MeasurementManager::calculateFinalPoseChange(const cv::Mat& T_CamA_Obj_curr
 bool MeasurementManager::calculateFinalPoseChange(const cv::Mat& T_CamA_Obj_prev, const cv::Mat& T_CamA_Obj_curr,
     const cv::Mat& T_CamB_Board_prev, const cv::Mat& T_CamB_Board_curr,
     const cv::Mat& T_CamA_Board_fixed, cv::Mat& angle, cv::Mat& t_relative) {
-    
+
     if (T_CamA_Obj_prev.empty() || T_CamA_Obj_curr.empty() ||
         T_CamB_Board_prev.empty() || T_CamB_Board_curr.empty() ||
         T_CamA_Board_fixed.empty()) {

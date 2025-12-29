@@ -107,12 +107,12 @@ void solvePnPWithCircleCorrection(
     cv::solvePnP(objectPoints, originalImagePoints, cameraMatrix, distCoeffs, rvec, tvec, false, cv::SOLVEPNP_EPNP);
 
     // 优化点1: 减少迭代次数 (通常3次足矣)
-    const int max_iterations = 3;
+    const int max_iterations = 5;
 
     // 优化点2: 静态缓存圆周模板，避免重复分配内存
     static std::vector<cv::Point3f> circleTemplate;
     if (circleTemplate.empty()) {
-        int numSamples = 36; // 优化点3: 减少采样点数，72 -> 36 足够拟合椭圆
+        int numSamples = 108; // 优化点3: 减少采样点数，72 -> 36 足够拟合椭圆
         for (int i = 0; i < numSamples; ++i) {
             double theta = 2.0 * CV_PI * i / numSamples;
             circleTemplate.emplace_back(cos(theta) * markerRadius, sin(theta) * markerRadius, 0.0f);
@@ -230,7 +230,7 @@ static double compute_reprojection_error(
 
 // 新的鲁棒匹配函数
     // 返回包含关键骨架点和待定侧翼点的列表
-    // ID 105 和 107 为临时ID，分别代表向量两侧的点
+    // ID 105 和 107 为临时ID，分别代表向量两侧的点  
 std::vector<PointWithId> match_points_robust(const std::vector<cv::Point2f>& detected_pts) {
     if (detected_pts.size() != 14) return {};
 
@@ -483,24 +483,24 @@ bool MeasurementManager::processMeasurement(const cv::Mat& camA_image, const cv:
         // 这里我们传入一个 dummy，因为 customRANSACPnP 内部有写死的 3D 点坐标
         std::vector<cv::Point3f> dummy_3d = {
             // a部分 (ID 1-3): 位于Y方向 (上方)
-            {-0.0f, 120.0f, 50.0f}, // ID 1
-            {-0.0f, 100.0f, 50.0f}, // ID 2
-            {-0.0f, 80.0f, 50.0f}, // ID 3
+           {-0.5977, 119.6644, 49.7042},  // Marker ID: 1
+           {-0.3116, 100.0031, 49.7346},  // Marker ID: 2
+           {-0.3347, 79.7212, 49.7342},   // Marker ID: 3
 
-            // b部分 (ID 4-8): 沿着-Y轴排列 (+Y向上)
-            {  0.0f, 20.0f, 0.0f}, // ID 4
-            { 20.0f,   0.0f, 0.0f}, // ID 5
-            { -0.0f,   0.0f, 0.0f}, // ID 6 (中心点)
-            {-20.0f,   0.0f, 0.0f}, // ID 7
-            {  0.0f, -20.0f, 0.0f}, // ID 8
+           // b部分 (ID 4-8): 沿着-Y轴排列 (+Y向上)
+           {0.0000, 20.2677, 0.0000},     // Marker ID: 4
+           {19.8696, 0.3551, 0.0035},     // Marker ID: 5
+           {0.0000, 0.0000, 0.0000},      // Marker ID: 6(中心点)
+           {-20.0916, 0.0927, 0.0075},    // Marker ID: 7
+           {0.1774, -19.8517, 0.0021},    // Marker ID: 8
 
-            // c部分 (ID 9-14): 位于-Y方向 (下方)，且有50mm深度
-            {  0.0f, -80.0f, 50.0f}, // ID 9
-            { 30.0f, -100.0f, 50.0f}, // ID 10
-            { 10.0f, -100.0f, 50.0f}, // ID 11
-            {-10.0f, -100.0f, 50.0f}, // ID 12
-            {-30.0f, -100.0f, 50.0f}, // ID 13
-            { -0.0f, -120.0f, 50.0f}  // ID 14
+           // c部分 (ID 9-14): 位于-Y方向 (下方)
+           {0.2526, -79.0333, 49.7844},   // Marker ID: 9
+           {29.8784, -99.0601, 49.7825},  // Marker ID: 10
+           {10.0528, -99.0347, 49.8143},  // Marker ID: 11
+           {-9.9231, -99.1172, 49.7992},  // Marker ID: 12
+           {-29.7733, -99.3615, 49.8123}, // Marker ID: 13
+           {0.2882, -119.1413, 49.8173}   // Marker ID: 14
         };
 
         if (customRANSACPnP(dummy_3d, buffer_cornersA_, cameraA_, 0, 0, 0, rvec, tvec, totalerror)) {

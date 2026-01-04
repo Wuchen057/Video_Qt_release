@@ -29,7 +29,7 @@ bool PoseEstimator::solvePnP(const std::vector<cv::Point3f>& objectPoints,
 
     bool success = cv::solvePnP(objectPoints, imagePoints,
         camera.getCameraMatrix(), camera.getDistCoeffs(),
-        rvec, tvec, false, pnpMethod);
+        rvec, tvec, false, cv::SOLVEPNP_IPPE);
 
     if (!success) {
         std::cerr << "[Warn] PnP failed to converge." << std::endl;

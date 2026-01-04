@@ -69,6 +69,7 @@
     <QtRcc Include="Video_Qt_release.qrc" />
     <QtUic Include="Video_Qt_release.ui" />
     <ClCompile Include="glad.c" />
+    <ClCompile Include="src\camerafileapp.cpp" />
     <ClCompile Include="src\IntegratedPoseTracker.cpp" />
     <ClCompile Include="src\Managers\CalibrationManager.cpp" />
     <ClCompile Include="src\Managers\MeasurementManager.cpp" />
@@ -85,6 +86,7 @@
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <QtMoc Include="src\camerafileapp.h" />
     <ClInclude Include="src\CommonTypes.h" />
     <QtMoc Include="src\trajectory3dplotter.h" />
     <QtMoc Include="src\IntegratedPoseTracker.h" />

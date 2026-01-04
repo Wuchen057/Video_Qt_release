@@ -76,6 +76,9 @@
     <ClCompile Include="glad.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\camerafileapp.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\Managers\CalibrationManager.h">
@@ -120,6 +123,9 @@
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="src\trajectory3dplotter.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="src\camerafileapp.h">
       <Filter>Header Files</Filter>
     </QtMoc>
   </ItemGroup>

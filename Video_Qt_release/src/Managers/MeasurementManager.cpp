@@ -165,7 +165,8 @@ void solvePnPWithCircleCorrection(
         }
 
         // F. 重新解算 (使用 ITERATIVE 进行微调)
-        bool success = cv::solvePnP(objectPoints, correctedImagePoints, cameraMatrix, distCoeffs, rvec, tvec, true, cv::SOLVEPNP_ITERATIVE);
+        //bool success = cv::solvePnP(objectPoints, correctedImagePoints, cameraMatrix, distCoeffs, rvec, tvec, true, cv::SOLVEPNP_ITERATIVE);
+        bool success = cv::solvePnP(objectPoints, correctedImagePoints, cameraMatrix, distCoeffs, rvec, tvec, true, cv::SOLVEPNP_SQPNP);
 
         // 2. 将 3D 点重投影回 2D 图像
         std::vector<cv::Point2f> projectedPoints;
